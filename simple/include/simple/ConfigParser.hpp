@@ -100,6 +100,12 @@ class ConfigParser {
          * @return std::string The output file name.
          */
         const std::string getOutputFileName() const;
+
+        // Registration solver: "bfgs" or "gn".
+        const std::string getSolver() const;
+
+        // Max Gauss-Newton iterations (gn solver only).
+        const int getMaxIters() const;
         
     private:
         // The expected number of commandline arguments.
@@ -135,6 +141,10 @@ class ConfigParser {
 
         // Path to the algorithm configuration file.
         std::string yamlFilePath_;
+
+        std::string solver_ = "bfgs";
+
+        int maxIters_ = 30;
 };
 
 #endif // CONFIGPARSER_H

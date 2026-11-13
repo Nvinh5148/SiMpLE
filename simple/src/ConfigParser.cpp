@@ -20,6 +20,9 @@ int ConfigParser::parseConfig() {
         minSensorRange_ = configFromYaml["minSensorRange"].as<double>();
         scanPath_ = configFromYaml["scanPath"].as<std::string>();
         outputFileName_ = configFromYaml["outputFileName"].as<std::string>();
+        // Optional: "bfgs" (original SiMpLE) or "gn" (Gauss-Newton + Welsch IRLS).
+        solver_ = configFromYaml["solver"] ? configFromYaml["solver"].as<std::string>() : "bfgs";
+        maxIters_ = configFromYaml["maxIters"] ? configFromYaml["maxIters"].as<int>() : 30;
 
     } catch(const YAML::BadFile& e) {
         std::cerr << e.what() << std::endl;
@@ -65,4 +68,12 @@ const std::string ConfigParser::getScanPath() const {
 
 const std::string ConfigParser::getOutputFileName() const {
     return outputFileName_;
+}
+
+const std::string ConfigParser::getSolver() const {
+    return solver_;
+}
+
+const int ConfigParser::getMaxIters() const {
+    return maxIters_;
 }

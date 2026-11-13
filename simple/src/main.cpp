@@ -35,7 +35,7 @@ int main(int argc, char* argv[]) {
     // Container for a new scan.
     PointCloud newScan(config.getVoxelSizeScan(), config.getMaxSensorRange(), config.getMinSensorRange(), config.getKitti());
     PointMap subMap(config.getVoxelSizeMap(), config.getMaxSensorRange());
-    Register scanToMapRegister(config.getConvergenceTol(), config.getSigma());
+    Register scanToMapRegister(config.getConvergenceTol(), config.getSigma(), config.getSolver(), config.getMaxIters());
 
     // Loop over all input scans, update the submap, and save the registration
     // result.
@@ -72,12 +72,13 @@ int main(int argc, char* argv[]) {
     // Calculate the average time per registration result.
     auto stopReg = std::chrono::high_resolution_clock::now();
     auto durationReg = std::chrono::duration_cast<std::chrono::milliseconds>(stopReg - startReg);
-    double avgTimePerScan = durationReg.count() / numScans;
+    double avgTimePerScan = double(durationReg.count()) / numScans;
 
     // Write results.
     // Output a file with the results in the KITTI format, and a file with the configuration parameters.
     utils::writeResults(config, poseEstimates, config.getOutputFileName(), avgTimePerScan);
     std::cout << "avgTimePerScan [ms] = " << avgTimePerScan << ";" << std::endl;
+    if (config.getSolver() == "gn") std::cout << "avgGNIters = " << scanToMapRegister.getAvgIters() << std::endl;
     
     return 0;
 }

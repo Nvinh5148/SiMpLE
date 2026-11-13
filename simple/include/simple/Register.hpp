@@ -16,7 +16,10 @@ class Register {
          * @param convergenceTol The convergence tolerance for the optimisation.alignas
          * @param sigma The scoring parameter for the objective function.
          */
-        Register(double convergenceTol, double sigma);
+        Register(double convergenceTol, double sigma, const std::string &solver = "bfgs", int maxIters = 30);
+
+        // Average Gauss-Newton iterations per scan (gn solver).
+        double getAvgIters() const { return numRegs_ ? double(totalIters_) / numRegs_ : 0.0; }
 
         /**
          * @brief Destroy the Register object.
@@ -55,6 +58,19 @@ class Register {
 
         // Scoring parameter for the objective function.
         double rewardParam_;
+
+        double sigma_;
+
+        bool useGN_;
+
+        int maxIters_;
+
+        long totalIters_ = 0;
+
+        long numRegs_ = 0;
+
+        // Gauss-Newton + Welsch (IRLS) on SE(3), re-associating every iteration.
+        double solveGN_(const std::vector<Eigen::Vector4d> &scan, my_kd_tree_t *tree, Eigen::Matrix4d &T);
 
         // Initial seed for the optimisation solver - start at the origin.
         std::vector<double> seedConstVel_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};

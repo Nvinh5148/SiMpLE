@@ -1,5 +1,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_ros/transform_broadcaster.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
@@ -20,6 +23,11 @@ public:
     subPointcloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "pointcloud", 10, std::bind(&LidarOdometry::pointcloudCallback, this, _1));
     pubOdom_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+    // Visualisation outputs.
+    pubPath_ = this->create_publisher<nav_msgs::msg::Path>("simple/path", 10);
+    pubMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("simple/map", 1);
+    tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    mapPublishEvery_ = this->declare_parameter<int>("mapPublishEvery", 10);
 
     voxelSizeScan_ = this->declare_parameter<float>("voxelSizeScan", 0.5);
     float voxelSizeMap = this->declare_parameter<float>("voxelSizeMap", 2.0);
@@ -97,11 +105,53 @@ private:
     odomMessage_.child_frame_id = msg->header.frame_id;
 
     this->pubOdom_->publish(odomMessage_);
+    publishVisualisation_();
 
     initialised_ = true;
   }
 
+  void publishVisualisation_() {
+    // TF odom -> lidar frame so the raw scan overlays the map in RViz.
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header = odomMessage_.header;
+    tf.child_frame_id = odomMessage_.child_frame_id;
+    tf.transform.translation.x = odomMessage_.pose.pose.position.x;
+    tf.transform.translation.y = odomMessage_.pose.pose.position.y;
+    tf.transform.translation.z = odomMessage_.pose.pose.position.z;
+    tf.transform.rotation = odomMessage_.pose.pose.orientation;
+    tfBroadcaster_->sendTransform(tf);
+
+    geometry_msgs::msg::PoseStamped ps;
+    ps.header = odomMessage_.header;
+    ps.pose = odomMessage_.pose.pose;
+    path_.header = odomMessage_.header;
+    path_.poses.push_back(ps);
+    pubPath_->publish(path_);
+
+    // Local map (already in the odom frame), throttled.
+    if (mapPublishEvery_ > 0 && (scanCount_++ % mapPublishEvery_) == 0) {
+      const auto &pts = subMap_->getPtCloud();
+      sensor_msgs::msg::PointCloud2 cloud;
+      cloud.header = odomMessage_.header;
+      sensor_msgs::PointCloud2Modifier mod(cloud);
+      mod.setPointCloud2FieldsByString(1, "xyz");
+      mod.resize(pts.size());
+      sensor_msgs::PointCloud2Iterator<float> ix(cloud, "x"), iy(cloud, "y"), iz(cloud, "z");
+      for (const auto &p : pts) {
+        *ix = p(0); *iy = p(1); *iz = p(2);
+        ++ix; ++iy; ++iz;
+      }
+      pubMap_->publish(cloud);
+    }
+  }
+
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subPointcloud_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubMap_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
+  nav_msgs::msg::Path path_;
+  int mapPublishEvery_ = 10;
+  size_t scanCount_ = 0;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdom_;
   nav_msgs::msg::Odometry odomMessage_;
 
