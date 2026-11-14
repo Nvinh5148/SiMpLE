@@ -28,4 +28,7 @@ target_compile_features(lidar_odometry PUBLIC c_std_99 cxx_std_17)
 install(TARGETS lidar_odometry
   DESTINATION lib/${PROJECT_NAME})
 
+install(DIRECTORY launch config rviz
+  DESTINATION share/${PROJECT_NAME})
+
 ament_package()

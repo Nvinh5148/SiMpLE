@@ -11,6 +11,8 @@
   <depend>simple</depend>
 
   <depend>rclcpp</depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
   <depend>nav_msgs</depend>
   <depend>liborocos-kdl</depend>
   <depend>sensor_msgs</depend>

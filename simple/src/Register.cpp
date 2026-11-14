@@ -2,7 +2,8 @@
 
 #include <string>
 
-#include <tbb/combinable.h>
+#include <tbb/parallel_reduce.h>
+#include <tbb/blocked_range.h>
 
 Register::Register(double convergenceTol, double sigma, const std::string &solver, int maxIters)
     : convTol_(convergenceTol),
@@ -44,31 +45,25 @@ struct NormalEq {
     Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
     double reward = 0.0;
 };
-}  // namespace
 
-// Objective (same as SiMpLE Eq. 2-5): maximise sum_i exp(-d_i^2 / 2 sigma^2),
-// i.e. minimise the Welsch loss sum_i sigma^2 (1 - exp(-d_i^2 / 2 sigma^2)) of the
-// point-to-point residual r_i = T p_i - q_i, q_i = nearest map point.
-// IRLS: w_i = exp(-d_i^2 / 2 sigma^2), H = sum w J^T J, g = sum w J^T r.
-// Left perturbation T <- Exp(xi) T, so dr/dxi = [-[y]x, I] with y = T p.
-double Register::solveGN_(const std::vector<Eigen::Vector4d> &scan, my_kd_tree_t *tree, Eigen::Matrix4d &T) {
-    double reward = 0.0;
-    int it = 0;
-    for (; it < maxIters_; it++) {
-        const Eigen::Matrix3d R = T.block<3,3>(0,0);
-        const Eigen::Vector3d t = T.block<3,1>(0,3);
-        tbb::combinable<NormalEq> acc;
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, scan.size()), [&](const tbb::blocked_range<size_t> &rg) {
-            NormalEq &ne = acc.local();
+// Normal equations at pose T. Deterministic reduction (fixed split order),
+// so results are repeatable run to run.
+NormalEq buildNormalEq(const std::vector<Eigen::Vector4d> &scan, my_kd_tree_t *tree,
+                       const Eigen::Matrix4d &T, double rewardParam, bool withJacobian) {
+    const Eigen::Matrix3d R = T.block<3,3>(0,0);
+    const Eigen::Vector3d t = T.block<3,1>(0,3);
+    return tbb::parallel_deterministic_reduce(
+        tbb::blocked_range<size_t>(0, scan.size(), 256), NormalEq(),
+        [&](const tbb::blocked_range<size_t> &rg, NormalEq ne) {
             for (size_t i = rg.begin(); i < rg.end(); i++) {
                 Eigen::Vector3d y = R * scan[i].head<3>() + t;
                 double q[3] = {y(0), y(1), y(2)};
                 uint32_t idx;
                 double d2;
                 tree->knnSearch(q, 1, &idx, &d2);
-                double w = exp(-d2 * rewardParam_);
+                double w = exp(-d2 * rewardParam);
                 ne.reward += w;
-                if (w < 1e-6) continue;
+                if (!withJacobian || w < 1e-6) continue;
                 const auto &m = tree->dataset_.pts[idx];
                 Eigen::Vector3d r = y - Eigen::Vector3d(m.x, m.y, m.z);
                 Eigen::Matrix<double, 3, 6> J;
@@ -77,20 +72,57 @@ double Register::solveGN_(const std::vector<Eigen::Vector4d> &scan, my_kd_tree_t
                 ne.H.noalias() += w * J.transpose() * J;
                 ne.g.noalias() += w * J.transpose() * r;
             }
-        });
-        NormalEq tot = acc.combine([](const NormalEq &a, const NormalEq &b) {
+            return ne;
+        },
+        [](const NormalEq &a, const NormalEq &b) {
             NormalEq c; c.H = a.H + b.H; c.g = a.g + b.g; c.reward = a.reward + b.reward; return c;
         });
-        reward = tot.reward;
-        Eigen::Matrix<double, 6, 1> dx = tot.H.ldlt().solve(-tot.g);
+}
+}  // namespace
+
+// Objective (same as SiMpLE Eq. 2-5): maximise sum_i exp(-d_i^2 / 2 sigma^2),
+// i.e. minimise the Welsch loss sum_i sigma^2 (1 - exp(-d_i^2 / 2 sigma^2)) of the
+// point-to-point residual r_i = T p_i - q_i, q_i = nearest map point.
+// IRLS: w_i = exp(-d_i^2 / 2 sigma^2), H = sum w J^T J, g = sum w J^T r.
+// Left perturbation T <- Exp(xi) T, so dr/dxi = [-[y]x, I] with y = T p.
+double Register::solveGN_(const std::vector<Eigen::Vector4d> &scan, my_kd_tree_t *tree, Eigen::Matrix4d &T) {
+    // Plain IRLS steps are always uphill but short when the seed is far from the optimum:
+    // consecutive steps then point the same way (cos ~ 0.99) and only gain ~1 cm each.
+    // Accelerate: while consecutive steps stay aligned, double the step multiplier alpha.
+    // Safeguard: an extrapolated step that lowers the reward is redone as a plain step,
+    // so the reward still never decreases.
+    const double kAlignCos = 0.9, kMaxAlpha = 16.0;
+    typedef Eigen::Matrix<double, 6, 1> Vec6;
+
+    NormalEq ne = buildNormalEq(scan, tree, T, rewardParam_, true);
+    Vec6 dxPrev = Vec6::Zero();
+    double alpha = 1.0;
+    int it = 0;  // number of normal-equation builds after the first (= cost)
+    while (it < maxIters_) {
+        Vec6 dx = ne.H.ldlt().solve(-ne.g);
         if (!dx.allFinite()) break;
-        T = expSE3(dx) * T;
         // Stop on small update: rotation [rad] and translation [m].
-        if (dx.head<3>().norm() < convTol_ * 1e-1 && dx.tail<3>().norm() < convTol_) { it++; break; }
+        const bool converged = dx.head<3>().norm() < convTol_ * 1e-1 && dx.tail<3>().norm() < convTol_;
+        const bool aligned = dx.dot(dxPrev) > kAlignCos * dx.norm() * dxPrev.norm();
+        alpha = (aligned && !converged) ? std::min(2.0 * alpha, kMaxAlpha) : 1.0;
+
+        Eigen::Matrix4d Tn = expSE3(alpha * dx) * T;
+        NormalEq nn = buildNormalEq(scan, tree, Tn, rewardParam_, !converged);
+        it++;
+        if (alpha > 1.0 && nn.reward < ne.reward) {  // overshoot: fall back to the plain step
+            alpha = 1.0;
+            Tn = expSE3(dx) * T;
+            nn = buildNormalEq(scan, tree, Tn, rewardParam_, true);
+            it++;
+        }
+        T = Tn;
+        ne = nn;
+        dxPrev = dx;
+        if (converged) break;
     }
     totalIters_ += it;
     numRegs_++;
-    return -reward;
+    return -ne.reward;  // reward at the returned pose
 }
 
 double Register::getRegistrationScore() const {

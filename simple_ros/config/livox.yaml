@@ -1,0 +1,10 @@
+lidar_odometry:
+  ros__parameters:
+    odom_frame: simple_odom
+    rMin: 2.0          # was 0.5
+    rMax: 60.0
+    voxelSizeScan: 0.25
+    voxelSizeMap: 0.5
+    sigma: 0.25
+    solver: gn     # bfgs | gn
+    maxIters: 30      # gn only

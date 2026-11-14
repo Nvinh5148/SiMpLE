@@ -26,6 +26,7 @@ public:
     // Visualisation outputs.
     pubPath_ = this->create_publisher<nav_msgs::msg::Path>("simple/path", 10);
     pubMap_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("simple/map", 1);
+    pubFrame_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("simple/frame", 1);
     tfBroadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     mapPublishEvery_ = this->declare_parameter<int>("mapPublishEvery", 10);
 
@@ -35,10 +36,17 @@ public:
     rMax_ = this->declare_parameter<float>("rMax", 120);
     float sigma = this->declare_parameter<float>("sigma", 0.3);
     float epsilon = this->declare_parameter<float>("epsilon", 1e-3);
+    std::string solver = this->declare_parameter<std::string>("solver", "bfgs");  // "bfgs" | "gn"
+    int maxIters = this->declare_parameter<int>("maxIters", 30);                  // gn only
     odomMessage_.header.frame_id = this->declare_parameter<std::string>("odom_frame", "odom");
 
     subMap_ = std::make_unique<PointMap>(voxelSizeMap, rMax_);
-    scanToMapRegister_ = std::make_unique<Register>(epsilon, sigma);
+    if (solver != "bfgs" && solver != "gn") {
+      RCLCPP_WARN(this->get_logger(), "Unknown solver '%s', using bfgs", solver.c_str());
+      solver = "bfgs";
+    }
+    RCLCPP_INFO(this->get_logger(), "Solver: %s", solver.c_str());
+    scanToMapRegister_ = std::make_unique<Register>(epsilon, sigma, solver, maxIters);
   }
 
 private:
@@ -105,9 +113,27 @@ private:
     odomMessage_.child_frame_id = msg->header.frame_id;
 
     this->pubOdom_->publish(odomMessage_);
+    publishFrame_(newScan.getPtCloud(), hypothesis);
     publishVisualisation_();
 
     initialised_ = true;
+  }
+
+  // Current downsampled scan, transformed into the odom frame.
+  void publishFrame_(const std::vector<Eigen::Vector4d> &pts, const Eigen::Matrix4d &T) {
+    sensor_msgs::msg::PointCloud2 cloud;
+    cloud.header.stamp = odomMessage_.header.stamp;
+    cloud.header.frame_id = odomMessage_.header.frame_id;
+    sensor_msgs::PointCloud2Modifier mod(cloud);
+    mod.setPointCloud2FieldsByString(1, "xyz");
+    mod.resize(pts.size());
+    sensor_msgs::PointCloud2Iterator<float> ix(cloud, "x"), iy(cloud, "y"), iz(cloud, "z");
+    for (const auto &p : pts) {
+      const Eigen::Vector4d q = T * Eigen::Vector4d(p(0), p(1), p(2), 1.0);
+      *ix = q(0); *iy = q(1); *iz = q(2);
+      ++ix; ++iy; ++iz;
+    }
+    pubFrame_->publish(cloud);
   }
 
   void publishVisualisation_() {
@@ -148,6 +174,7 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subPointcloud_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPath_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubMap_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubFrame_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tfBroadcaster_;
   nav_msgs::msg::Path path_;
   int mapPublishEvery_ = 10;
