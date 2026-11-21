@@ -11,6 +11,10 @@ find_package(TBB REQUIRED)
 find_package(dlib REQUIRED)
 find_package(Threads REQUIRED)
 find_package(yaml-cpp REQUIRED)
+# yaml-cpp < 0.8 (Ubuntu 22.04) exports the target as "yaml-cpp" only
+if(NOT TARGET yaml-cpp::yaml-cpp)
+  add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
+endif()
 
 # Define source files (excluding main.cpp, so library is reusable)
 set(SOURCES
